@@ -245,3 +245,115 @@ def fetch_playurl(bvid, qn=80, page=1):
     if info.get("err"):
         raise RuntimeError("取 playurl 失败：%s" % info["err"])
     return info["url"], (info["w"], info["h"]), info.get("audio", ""), info.get("quality")
+
+
+# ---------------------------------------------------------------- CC 字幕
+
+def _wbi_keys_via(c):
+    """在页面里取 wbi 的两个 key（顺便判断是否登录）。返回 (img_key, sub_key) 或 None。
+
+    字幕接口**必须**带 wbi 签名：不签名的 x/player/v2 会被风控，
+    返回随机的诱饵数据——同一个视频连打 5 次能拿到 5 个不同的字幕地址。
+    """
+    info = c.js("""(async()=>{try{
+        const r = await fetch('https://api.bilibili.com/x/web-interface/nav',{credentials:'include'});
+        const j = await r.json();
+        const w = (j.data||{}).wbi_img||{};
+        return JSON.stringify({login: !!(j.data&&j.data.isLogin), img:w.img_url||'', sub:w.sub_url||''});
+    }catch(e){return null}})()""")
+    if not info:
+        return None
+    try:
+        d = json.loads(info) if isinstance(info, str) else info
+    except Exception:
+        return None
+    if not (d.get("login") and d.get("img") and d.get("sub")):
+        return None
+    img = d["img"].rsplit("/", 1)[-1].split(".")[0]
+    sub = d["sub"].rsplit("/", 1)[-1].split(".")[0]
+    return img, sub
+
+
+def _cid_via(c, bvid, page=1):
+    """取指定 P 的 cid（多 P 视频不指定就会永远拿到第 1 P）。"""
+    idx = max(0, int(page or 1) - 1)
+    return c.js("""(async()=>{try{
+        const j = await (await fetch('https://api.bilibili.com/x/web-interface/view?bvid=%s',
+                                    {credentials:'include'})).json();
+        if (j.code !== 0) return null;
+        const ps = j.data.pages || [];
+        return ps.length > %d ? ps[%d].cid : (j.data.cid || null);
+    }catch(e){return null}})()""" % (bvid, idx, idx))
+
+
+def _subtitle_body_expr(signed_query):
+    """用**已签名**的 query 调字幕接口，再把字幕 JSON 下载成列表。返回 [[from,to,text],...] 或 null。
+
+    只保留真有 url 的项：ai-zh 有时返回空字符串，空串会让 fetch('') 变成请求当前页。
+    """
+    return """(async()=>{try{
+        const r = await fetch('https://api.bilibili.com/x/player/wbi/v2?%s',
+                              {credentials:'include', cache:'no-store'});
+        const j = await r.json();
+        const subs = ((j.data||{}).subtitle||{}).subtitles||[];
+        const cand = subs.filter(x => x && x.subtitle_url && x.subtitle_url.trim());
+        if (!cand.length) return null;
+        // 中文优先，没有就取第一个可用项
+        const pick = cand.find(x => /^(ai-)?zh/i.test(x.lan || '')) || cand[0];
+        let u = pick.subtitle_url;
+        if (u.startsWith('//')) u = 'https:' + u;
+        const j3 = await (await fetch(u, {cache:'no-store'})).json();
+        const body = j3.body || [];
+        return body.length ? body.map(x => [x.from, x.to, x.content]) : null;
+    }catch(e){return null}})()""" % signed_query
+
+
+def fetch_subtitle(bvid, page=1):
+    """取 B站自带的 CC 字幕（含 AI 字幕），返回 [(from, to, text), ...] 或 None。
+
+    **不需要装任何模型**，只要有登录态。UP 主没传字幕、也没 AI 字幕的片子返回 None。
+
+    实现上和取播放直链是同一套：开一个登录过的 Edge → 打开首页让 cookie 就位
+    → nav 拿 wbi key → view 拿 cid → Python 算签名 → 页面里请求 → 下载字幕。
+    """
+    port = config.EDGE_PORT
+    started = None
+    try:
+        try:
+            started = start_edge(config.EDGE_PROFILE, port)
+        except Exception as e:
+            print("  [CC字幕] %s" % e)
+            return None
+        # about:blank 上没有 cookie，得先打开 B站首页，还要等几秒
+        tgt = http_json(port, "/json/new?" + urllib.parse.quote("https://www.bilibili.com/",
+                                                                safe=":/?=&"), method="PUT")
+        c = CDP(tgt["webSocketDebuggerUrl"])
+        try:
+            c.call("Page.enable")
+            c.call("Page.navigate", url="https://www.bilibili.com/")
+            time.sleep(4)
+            keys = _wbi_keys_via(c)
+            if not keys:
+                return None                     # 没登录态：AI 字幕本来也不给
+            cid = _cid_via(c, bvid, page)
+            if not cid:
+                return None
+            params = {"bvid": bvid, "cid": cid, "wts": int(time.time())}
+            query = _wbi_sign(params, keys[0], keys[1])
+            return c.js(_subtitle_body_expr(query)) or None
+        finally:
+            c.close()
+    except Exception as e:
+        print("  [CC字幕] 取失败：%s" % type(e).__name__)
+        return None
+    finally:
+        # 只有「这次是我起的」才关；复用别人的实例别动
+        if started:
+            stop_edge(config.EDGE_PROFILE)
+
+
+def fmt_subtitle(cues):
+    def ts(s):
+        s = float(s)
+        return "%02d:%02d" % (int(s) // 60, int(s) % 60)
+    return "\n".join("[%s] %s" % (ts(a), txt) for a, b, txt in cues)

@@ -154,8 +154,10 @@ def grab(src, times, folder):
     return imgs
 
 
-def audio_chain(src, base, bv, page=1, asr="medium", hotwords=""):
+def audio_chain(src, base, bv, page=1, asr="medium", hotwords="", skip_asr=False):
     """抽音轨 → 分离 → 转写。任何一步失败都不影响画面那部分。
+
+    skip_asr=True 时跳过转写（已经拿到 B站 CC 字幕了，不用再花几分钟转一遍）。
 
     🔴 2026-11-02 坑：B站直链给的 mp4 是 **DASH 纯视频流，里面根本没有音轨**，
        ffmpeg 直接报 "Output file does not contain any stream"。所以抽不出来时
@@ -217,6 +219,9 @@ def audio_chain(src, base, bv, page=1, asr="medium", hotwords=""):
             print("  分离失败:", (r.stderr or "")[-300:])
             return None
 
+    if skip_asr:
+        print("  已有 CC 字幕，跳过转写", flush=True)
+        return vocals
     if not config.ok(GPU_PY):
         print("  没配 ASR_PY，跳过转写（人声已经分离好了）", flush=True)
         return vocals
@@ -382,8 +387,17 @@ def main():
             sheets.append(dst)
         print(f"分镜图 {len(sheets)} 张（每张 9 帧）")
 
+    got_cc = False
     if want_audio:
-        audio_chain(src, base, bv, page, asr, hotwords)
+        # 先试 B站自带的 CC 字幕：不装任何模型，准确率还比转写高
+        print("  找 B站 CC 字幕…", flush=True)
+        cues = vp.fetch_subtitle(bv, page)
+        if cues:
+            with open(os.path.join(base, "字幕.txt"), "w", encoding="utf-8") as f:
+                f.write(vp.fmt_subtitle(cues))
+            print("  拿到 CC 字幕 %d 条 → 字幕.txt（不用转写了）" % len(cues))
+            got_cc = True
+        audio_chain(src, base, bv, page, asr, hotwords, skip_asr=got_cc)
 
     print("\n=== 现在该读这些 ===")
     for s in sheets:
