@@ -1,0 +1,9 @@
+numpy>=1.24
+Pillow>=10.0
+# 只有取高清直链时用得到（CDP over websocket）
+websocket-client>=1.6
+
+# ── 下面两个是「可选：声音部分」才需要的，不用字幕就别装 ──
+# faster-whisper>=1.0      # 转写，见 README「可选：声音部分」
+# demucs>=4.0              # 人声分离
+# soundfile>=0.12          # 人声分离读写 wav

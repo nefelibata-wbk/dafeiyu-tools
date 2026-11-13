@@ -1,0 +1,20 @@
+# 跑出来的东西，别进仓库
+data/
+视频解读/
+__pycache__/
+*.pyc
+*.pyo
+
+# 下载的源片和音频
+_src.mp4
+_audio.wav
+_audio.m4a
+_vocals/
+_frames/
+
+# 本地填好的配置（别把带个人路径的版本传上来）
+config_local.py
+.env
+
+# 浏览器调试档案
+edge-profile/
